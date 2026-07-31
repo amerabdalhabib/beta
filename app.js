@@ -1,4 +1,4 @@
-// Replace these with your actual Supabase project credentials
+// ⚠️ REPLACE THESE WITH YOUR ACTUAL KEYS ⚠️
 const SUPABASE_URL = 'YOUR_SUPABASE_URL';
 const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
 
@@ -32,15 +32,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Fetch initial data
     fetchArticlesFromSupabase();
-    
-    // Auto-refresh feed every 30 minutes
-    setInterval(fetchArticlesFromSupabase, 30 * 60 * 1000);
 });
 
 async function fetchArticlesFromSupabase() {
     try {
         const { data, error } = await supabaseClient
-            .from('news_articles')
+            .from('news_articles') // Ensure this matches your Supabase table name
             .select('*')
             .order('published_at', { ascending: false })
             .limit(50);
@@ -50,7 +47,8 @@ async function fetchArticlesFromSupabase() {
         globalData = data || [];
         renderArticles(globalData);
     } catch (err) {
-        console.error('Error fetching articles from Supabase:', err);
+        console.error('Error fetching articles:', err);
+        document.getElementById('news-feed').innerHTML = '<p>Error loading news. Check console for details.</p>';
     }
 }
 
@@ -90,24 +88,3 @@ window.toggleModal = function(id) {
         modal.style.display = modal.style.display === 'flex' ? 'none' : 'flex';
     }
 };
-
-// Back to top scroll listener
-window.addEventListener('scroll', () => {
-    const btp = document.getElementById('back-to-top');
-    if (btp) {
-        btp.style.display = window.scrollY > 400 ? 'flex' : 'none';
-    }
-});
-
-function applyView(view) {
-    currentView = view;
-    const feed = document.getElementById('news-feed');
-    if (!feed) return;
-    
-    // Update grid column layouts based on view state
-    if (view === 'grid-1') feed.style.gridTemplateColumns = '1fr';
-    else if (view === 'grid-2') feed.style.gridTemplateColumns = 'repeat(2, 1fr)';
-    else if (view === 'grid-3') feed.style.gridTemplateColumns = 'repeat(3, 1fr)';
-    else if (view === 'grid-4') feed.style.gridTemplateColumns = 'repeat(4, 1fr)';
-    else feed.style.gridTemplateColumns = '1fr';
-}
