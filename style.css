@@ -1,0 +1,120 @@
+:root {
+    --bg-color: #f9f9f9;
+    --text-color: #111;
+    --card-bg: #fff;
+    --border-color: #ddd;
+    --accent-color: #0066cc;
+}
+
+[data-theme="dark"] {
+    --bg-color: #121212;
+    --text-color: #f1f1f1;
+    --card-bg: #1e1e1e;
+    --border-color: #333;
+    --accent-color: #4da6ff;
+}
+
+body {
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    margin: 0;
+    padding: 0;
+}
+
+.site-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 2rem;
+    border-bottom: 1px solid var(--border-color);
+    background-color: var(--card-bg);
+}
+
+.header-left {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.brand-name {
+    font-size: 1.5rem;
+    margin: 0;
+}
+
+.header-right {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+}
+
+.main-container {
+    max-width: 1200px;
+    margin: 2rem auto;
+    padding: 0 1rem;
+}
+
+.news-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1.5rem;
+}
+
+.card {
+    background-color: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.card img {
+    width: 100%;
+    height: 160px;
+    object-fit: cover;
+}
+
+.card-content {
+    padding: 1rem;
+}
+
+/* Device specific view toggles */
+.seg-btn[data-view="grid-1"] { display: flex; }
+.seg-btn[data-view="grid-2"] { display: flex; }
+.seg-btn[data-view="grid-3"] { display: none; }
+.seg-btn[data-view="grid-4"] { display: none; }
+.seg-btn[data-view="list"] { display: none; }
+.seg-btn[data-view="text"] { display: flex; }
+.seg-btn[data-view="masonry"] { display: none; }
+
+@media (min-width: 768px) {
+    .seg-btn[data-view="grid-3"] { display: flex; }
+    .seg-btn[data-view="list"] { display: flex; }
+}
+
+@media (min-width: 1024px) {
+    .seg-btn[data-view="grid-4"] { display: flex; }
+}
+
+.modal-overlay {
+    position: fixed;
+    top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.5);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.modal-content {
+    background: var(--card-bg);
+    padding: 2rem;
+    border-radius: 8px;
+}
+
+.site-footer {
+    text-align: center;
+    padding: 2rem;
+    border-top: 1px solid var(--border-color);
+    margin-top: 4rem;
+}
