@@ -6,6 +6,7 @@ const API_WORKER_URL = 'https://amernewsapi.amerhabib.workers.dev/';
 let globalData = [];
 let filteredData = [];
 const itemsPerPage = 20; // Articles rendered per UI chunk
+const serverPageSize = 50; // Rows requested from the Worker on every API load
 let currentDisplayed = itemsPerPage;
 
 const CACHE_KEY = 'amernews_data';
@@ -14,8 +15,11 @@ const CACHE_PAGE_KEY = 'amernews_page';
 const CACHE_TTL = 3 * 60 * 1000;
 
 let isFetching = false;
-let fetchPageNum = 1;          // Tracks server page offset for Baserow pagination
-let hasMoreServerData = true;  // Explicit flag to control infinite scroll exhaustion
+let fetchPageNum = 1;          // Next server page to request
+let hasMoreServerData = true;  // Whether the current API query has another page
+let feedQueryKey = '';
+let activeRequestId = 0;
+let pendingFeedRequest = false;
 
 let activeCategories = safeParse(localStorage.getItem('newsCategories'), ['All']);
 let activeSources = safeParse(localStorage.getItem('newsSources'), ['All']);
@@ -181,9 +185,7 @@ window.clearSearch = function() {
     if (box) {
         box.value = '';
         updateSearchClearBtn();
-        fetchPageNum = 1;
-        hasMoreServerData = true;
-        fetchArticlesFromWorker(true);
+        fetchArticlesFromWorker({ reason: 'search', reset: true });
         box.focus();
     }
 }
@@ -193,10 +195,8 @@ window.clearAllFilters = function() {
     localStorage.setItem('newsCategories', JSON.stringify(['All']));
     localStorage.setItem('newsSources', JSON.stringify(['All']));
     localStorage.setItem('newsLanguages', JSON.stringify(['All']));
-    fetchPageNum = 1;
-    hasMoreServerData = true;
     setupFilters();
-    fetchArticlesFromWorker(true);
+    fetchArticlesFromWorker({ reason: 'filter', reset: true });
     showToast("Filters cleared");
 }
 
@@ -261,10 +261,8 @@ if (filterCont) filterCont.addEventListener('click', e => {
     const btn = e.target.closest('.capsule'); if (!btn) return;
     activeCategories = handleMultiSelect(btn.dataset.category, activeCategories, 'All');
     localStorage.setItem('newsCategories', JSON.stringify(activeCategories));
-    fetchPageNum = 1;
-    hasMoreServerData = true;
     setupFilters();
-    fetchArticlesFromWorker(true);
+    fetchArticlesFromWorker({ reason: 'filter', reset: true });
 });
 
 const sourceCont = document.getElementById('source-filter-container');
@@ -272,10 +270,8 @@ if (sourceCont) sourceCont.addEventListener('click', e => {
     const btn = e.target.closest('.capsule'); if (!btn) return;
     activeSources = handleMultiSelect(btn.dataset.source, activeSources, 'All');
     localStorage.setItem('newsSources', JSON.stringify(activeSources));
-    fetchPageNum = 1;
-    hasMoreServerData = true;
     setupFilters();
-    fetchArticlesFromWorker(true);
+    fetchArticlesFromWorker({ reason: 'filter', reset: true });
 });
 
 const langCont = document.getElementById('lang-filter-container');
@@ -283,10 +279,8 @@ if (langCont) langCont.addEventListener('click', e => {
     const btn = e.target.closest('.capsule'); if (!btn) return;
     activeLanguages = handleMultiSelect(btn.dataset.lang, activeLanguages, 'All');
     localStorage.setItem('newsLanguages', JSON.stringify(activeLanguages));
-    fetchPageNum = 1;
-    hasMoreServerData = true;
     setupFilters();
-    fetchArticlesFromWorker(true);
+    fetchArticlesFromWorker({ reason: 'filter', reset: true });
 });
 
 const searchBox = document.getElementById('search-box');
@@ -294,36 +288,76 @@ if (searchBox) searchBox.addEventListener('input', () => {
     updateSearchClearBtn();
     clearTimeout(searchDebounce);
     searchDebounce = setTimeout(() => {
-        fetchPageNum = 1;
-        hasMoreServerData = true;
-        currentDisplayed = itemsPerPage;
-        fetchArticlesFromWorker(true);
+        fetchArticlesFromWorker({ reason: 'search', reset: true });
     }, 350);
 });
 
 const sortBox = document.getElementById('sort-box');
 if (sortBox) sortBox.addEventListener('change', applyFiltersAndSort);
 
+function getSearchTerm() {
+    const box = document.getElementById('search-box');
+    return box ? box.value.trim() : '';
+}
+
+function getFeedQueryKey() {
+    return JSON.stringify({
+        search: getSearchTerm().toLowerCase(),
+        categories: [...activeCategories].sort(),
+        sources: [...activeSources].sort(),
+        languages: [...activeLanguages].sort()
+    });
+}
+
+function isDefaultFeedQuery() {
+    return !getSearchTerm() && activeCategories.includes('All') && activeSources.includes('All') && activeLanguages.includes('All');
+}
+
+function resetFeedSession() {
+    globalData = [];
+    filteredData = [];
+    fetchPageNum = 1;
+    hasMoreServerData = true;
+    currentDisplayed = itemsPerPage;
+    feedQueryKey = getFeedQueryKey();
+    activeRequestId++;
+}
+
+function addArticles(items) {
+    const knownUrls = new Set(globalData.map(item => item.url).filter(Boolean));
+    let added = 0;
+    items.forEach(item => {
+        if (!item || !item.url || knownUrls.has(item.url)) return;
+        globalData.push(item);
+        knownUrls.add(item.url);
+        added++;
+    });
+    return added;
+}
+
 function loadFromCache() {
-    const cachedTime = localStorage.getItem(CACHE_TIME_KEY);
+    if (!isDefaultFeedQuery()) return false;
+    const cachedTime = Number(localStorage.getItem(CACHE_TIME_KEY));
     const cachedData = localStorage.getItem(CACHE_KEY);
-    if (cachedTime && cachedData) {
-        try {
-            const data = JSON.parse(cachedData);
-            if (data.length > 0) {
-                globalData = data;
-                const cachedPage = localStorage.getItem(CACHE_PAGE_KEY);
-                fetchPageNum = cachedPage ? parseInt(cachedPage) : (Math.floor(globalData.length / 50) + 1);
-                setupFilters();
-                renderTicker(globalData.slice(0, 12));
-                currentDisplayed = itemsPerPage;
-                applyFiltersAndSort();
-                setTimeout(positionSegSlider, 50);
-                return true;
-            }
-        } catch (e) { }
+    if (!cachedTime || !cachedData || Date.now() - cachedTime > CACHE_TTL) return false;
+
+    try {
+        const data = JSON.parse(cachedData);
+        if (!Array.isArray(data) || data.length === 0) return false;
+        globalData = data.filter(item => item && item.url);
+        fetchPageNum = Math.max(1, Number(localStorage.getItem(CACHE_PAGE_KEY)) || Math.floor(globalData.length / serverPageSize) + 1);
+        feedQueryKey = getFeedQueryKey();
+        setupFilters();
+        renderTicker(globalData.slice(0, 12));
+        applyFiltersAndSort();
+        setTimeout(positionSegSlider, 50);
+        return true;
+    } catch (error) {
+        localStorage.removeItem(CACHE_KEY);
+        localStorage.removeItem(CACHE_TIME_KEY);
+        localStorage.removeItem(CACHE_PAGE_KEY);
+        return false;
     }
-    return false;
 }
 
 function updateSentinelLoader(show) {
@@ -343,152 +377,107 @@ function updateLoadMoreButton() {
     const spinner = document.getElementById('load-more-spinner');
     if (!container) return;
 
-    // Show the button whenever there is more data to load (from API or from local memory)
-    const hasMoreLocal = currentDisplayed < filteredData.length;
-    const showButton = (hasMoreServerData || hasMoreLocal) && globalData.length > 0;
-    
-    if (showButton) {
+    const showButton = hasMoreServerData && globalData.length > 0;
+    if (showButton || isFetching) {
         container.style.display = 'block';
-        if (btn) btn.disabled = false;
+        if (btn) btn.disabled = isFetching;
         if (text) {
             text.style.display = 'inline';
-            text.textContent = hasMoreLocal ? 'Show more articles' : 'Load more from database';
+            text.textContent = isFetching ? 'Loading articles...' : 'Load more articles';
         }
-        if (spinner) spinner.style.display = 'none';
+        if (spinner) spinner.style.display = isFetching ? 'inline-block' : 'none';
     } else {
         container.style.display = 'none';
     }
 }
 
 window.loadMoreFromApi = async function() {
-    if (isFetching) return;
-    
-    // If there are still un-displayed items in local memory, show those first
-    if (currentDisplayed < filteredData.length) {
-        currentDisplayed = Math.min(filteredData.length, currentDisplayed + itemsPerPage);
-        renderArticles();
-        updateLoadMoreButton();
-        window.scrollBy({ top: 200, behavior: 'smooth' });
-        return;
-    }
-    
-    // No more local items — always fetch the next page from Baserow API (never from cache)
-    if (!hasMoreServerData) {
-        updateLoadMoreButton();
-        return;
-    }
-    
-    const btn = document.getElementById('load-more-btn');
-    const text = document.getElementById('load-more-text');
-    const spinner = document.getElementById('load-more-spinner');
-    if (btn) btn.disabled = true;
-    if (text) text.style.display = 'none';
-    if (spinner) spinner.style.display = 'inline-block';
-    
-    // Force fetch from API — pass force=true to bypass cache check
-    await fetchArticlesFromWorker(true, true);
-    // fetchArticlesFromWorker internally calls applyFiltersAndSort → updateLoadMoreButton → resets button state
+    await fetchArticlesFromWorker({ reason: 'button' });
 }
 
-// ALWAYS fetches directly from Cloudflare Worker / Baserow proxy with active pagination
-async function fetchArticlesFromWorker(force = false, isLoadMoreCall = false) {
-    if (isFetching) return;
-    const searchVal = document.getElementById('search-box');
-    const searchTerm = searchVal ? searchVal.value.trim() : '';
-    
-    if (isLoadMoreCall && !hasMoreServerData) return;
+// Every call in this function, including infinite scroll and Load More, goes to the API.
+async function fetchArticlesFromWorker(options = {}) {
+    if (typeof options === 'boolean') {
+        options = { reason: 'refresh', reset: options };
+    }
+    const { reason = 'refresh', reset = false } = options;
+    const queryKey = getFeedQueryKey();
+    if (reset || queryKey !== feedQueryKey) resetFeedSession();
+    if (isFetching) {
+        pendingFeedRequest = true;
+        return false;
+    }
+    if (!hasMoreServerData && reason !== 'refresh') return false;
 
+    const requestId = activeRequestId;
+    const isInitialQueryLoad = reset || ['initial', 'cache-follow-up', 'filter', 'tag', 'search', 'reset', 'queued'].includes(reason);
+    const targetVisibleCount = isInitialQueryLoad ? itemsPerPage : currentDisplayed + itemsPerPage;
     isFetching = true;
     updateSentinelLoader(true);
+    updateLoadMoreButton();
+    if (globalData.length === 0) renderSkeletons(8);
 
     try {
-        const now = Date.now();
+        let totalAdded = 0;
+        let lastPageSize = 0;
+        let fetchedAtLeastOnePage = false;
 
-        if (!isLoadMoreCall && (force || globalData.length === 0)) {
-            const cachedTime = localStorage.getItem(CACHE_TIME_KEY);
-            if (!force && cachedTime && (now - Number(cachedTime) < CACHE_TTL) && !searchTerm) {
-                setupFilters();
-                renderTicker(globalData.slice(0, 12));
-                currentDisplayed = itemsPerPage;
-                applyFiltersAndSort();
-                setTimeout(positionSegSlider, 50);
-                isFetching = false;
-                updateSentinelLoader(false);
-                return;
-            }
-        }
+        // A customized query may have fewer than 20 matches in one server page.
+        // Keep asking the API until the visible target is filled or the database ends.
+        while (hasMoreServerData && (!fetchedAtLeastOnePage || filteredData.length < targetVisibleCount)) {
+            const params = new URLSearchParams({ page: String(fetchPageNum), size: String(serverPageSize) });
+            const searchTerm = getSearchTerm();
+            if (searchTerm) params.set('search', searchTerm);
+            // These are useful when supported by the Worker; client-side filtering below remains authoritative.
+            if (!activeCategories.includes('All')) params.set('category', activeCategories.join(','));
+            if (!activeSources.includes('All')) params.set('source', activeSources.join(','));
+            if (!activeLanguages.includes('All')) params.set('language', activeLanguages.join(','));
 
-        if (globalData.length === 0 && !isLoadMoreCall) renderSkeletons(8);
+            const response = await fetch(API_WORKER_URL + '?' + params.toString(), { cache: 'no-store' });
+            if (!response.ok) throw new Error('API returned HTTP ' + response.status);
+            const page = await response.json();
+            if (requestId !== activeRequestId) return false;
 
-        // Build query parameters pointing to Worker proxy
-        const queryParams = new URLSearchParams({ page: fetchPageNum.toString(), size: '50' });
-        if (searchTerm) queryParams.append('search', searchTerm);
+            const rows = Array.isArray(page) ? page : [];
+            fetchedAtLeastOnePage = true;
+            lastPageSize = rows.length;
+            const addedCount = addArticles(rows);
+            totalAdded += addedCount;
+            fetchPageNum += 1;
+            hasMoreServerData = rows.length === serverPageSize && addedCount > 0;
 
-        const res = await fetch(API_WORKER_URL + '?' + queryParams.toString());
-        
-        if (res.ok) {
-            const newData = await res.json();
-            if (Array.isArray(newData) && newData.length > 0) {
-                const existingUrls = new Set(globalData.map(item => item.url));
-                let addedCount = 0;
-                
-                newData.forEach(item => {
-                    if (item.url && !existingUrls.has(item.url)) {
-                        globalData.push(item);
-                        existingUrls.add(item.url);
-                        addedCount++;
-                    }
-                });
-
-                if (addedCount > 0) {
-                    fetchPageNum++;
-                } else {
-                    // All items were duplicates — we've likely exhausted new data
-                    hasMoreServerData = false;
-                }
-                
-                // If the worker returns fewer items than requested, we've reached the end of Baserow
-                if (newData.length < 20) {
-                    hasMoreServerData = false;
-                }
-            } else {
-                hasMoreServerData = false;
-            }
-        } else {
-            hasMoreServerData = false;
-        }
-
-        if (isLoadMoreCall) {
-            currentDisplayed += itemsPerPage;
-        }
-
-        if (!searchTerm && globalData.length > 0) {
-            try {
+            if (isDefaultFeedQuery() && globalData.length > 0) {
                 localStorage.setItem(CACHE_KEY, JSON.stringify(globalData));
-                localStorage.setItem(CACHE_TIME_KEY, now.toString());
-                localStorage.setItem(CACHE_PAGE_KEY, fetchPageNum.toString());
-            } catch (e) { }
+                localStorage.setItem(CACHE_TIME_KEY, String(Date.now()));
+                localStorage.setItem(CACHE_PAGE_KEY, String(fetchPageNum));
+            }
+
+            applyFiltersAndSort();
+            if (!rows.length || (addedCount === 0 && rows.length === serverPageSize)) break;
         }
 
+        currentDisplayed = Math.min(targetVisibleCount, filteredData.length);
         if (globalData.length > 0) {
-            setupFilters();
             renderTicker(globalData.slice(0, 12));
-        } else {
+        } else if (!hasMoreServerData) {
             const ticker = document.getElementById('ticker-bar');
             if (ticker) ticker.style.display = 'none';
         }
-
         applyFiltersAndSort();
         setTimeout(positionSegSlider, 50);
-
+        return totalAdded > 0 || lastPageSize > 0;
     } catch (error) {
-        console.error("Worker API Error:", error);
-        const ticker = document.getElementById('ticker-bar');
-        if (ticker) ticker.style.display = 'none';
+        console.error('Worker API Error:', error);
         if (globalData.length === 0) renderErrorState();
+        return false;
     } finally {
         isFetching = false;
         updateSentinelLoader(false);
+        updateLoadMoreButton();
+        if (pendingFeedRequest) {
+            pendingFeedRequest = false;
+            fetchArticlesFromWorker({ reason: 'queued' });
+        }
     }
 }
 
@@ -534,25 +523,15 @@ function applyFiltersAndSort() {
 // True Infinite Scroll Trigger: Expands local items or pulls fresh pages from Baserow
 function infiniteScrollTrigger() {
     if (isFetching) return;
-
-    if (currentDisplayed < filteredData.length) {
-        // Show next batch from already-fetched memory
-        currentDisplayed = Math.min(filteredData.length, currentDisplayed + itemsPerPage);
-        renderArticles();
-    } else if (hasMoreServerData) {
-        // If local items run out, actively hit the Cloudflare Worker API for the next Baserow page
-        fetchArticlesFromWorker(false, true);
-    }
+    if (hasMoreServerData) fetchArticlesFromWorker({ reason: 'infinite' });
 }
 
 window.filterByTag = function(tag) {
     if (!activeCategories.includes(tag)) {
         activeCategories = [tag];
         localStorage.setItem('newsCategories', JSON.stringify(activeCategories));
-        fetchPageNum = 1;
-        hasMoreServerData = true;
         setupFilters();
-        fetchArticlesFromWorker(true);
+        fetchArticlesFromWorker({ reason: 'tag', reset: true });
     }
     window.scrollTo({ top: 400, behavior: 'smooth' });
 }
@@ -744,7 +723,7 @@ function renderEmptyState() {
 
 function renderErrorState() {
     const container = document.getElementById('news-container');
-    if (container) container.innerHTML = '<div class="state-panel"><div class="state-title">Couldn\'t load the feed</div><div class="state-body">The connection to the news source failed. Check your connection and try again.</div><button class="state-action" onclick="fetchArticlesFromWorker(true)">Retry</button></div>';
+    if (container) container.innerHTML = '<div class="state-panel"><div class="state-title">Couldn\'t load the feed</div><div class="state-body">The connection to the news source failed. Check your connection and try again.</div><button class="state-action" onclick="fetchArticlesFromWorker({reset:true})">Retry</button></div>';
 }
 
 window.resetFilters = function() {
@@ -756,12 +735,9 @@ window.resetFilters = function() {
     if (box) box.value = '';
     const sortBox = document.getElementById('sort-box');
     if (sortBox) sortBox.value = 'newest';
-    fetchPageNum = 1;
-    hasMoreServerData = true;
-    currentDisplayed = itemsPerPage;
     updateSearchClearBtn();
     setupFilters();
-    fetchArticlesFromWorker(true);
+    fetchArticlesFromWorker({ reason: 'reset', reset: true });
 }
 
 function renderArticles() {
@@ -808,5 +784,7 @@ if (sentinel) scrollObserver.observe(sentinel);
 /* Initialize App */
 applyView(currentView);
 const cacheHit = loadFromCache();
-fetchArticlesFromWorker(cacheHit ? false : true);
-setInterval(() => { if (!document.hidden) fetchArticlesFromWorker(true); }, 3 * 60 * 1000);
+fetchArticlesFromWorker({ reason: cacheHit ? 'cache-follow-up' : 'initial', reset: !cacheHit });
+setInterval(() => {
+    if (!document.hidden) fetchArticlesFromWorker({ reason: 'refresh', reset: true });
+}, 3 * 60 * 1000);
