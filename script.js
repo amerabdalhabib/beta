@@ -363,11 +363,11 @@ function loadFromCache() {
 function updateSentinelLoader(show) {
     const sentinel = document.getElementById('scroll-sentinel');
     if (!sentinel) return;
-    if (show && (isFetching || hasMoreServerData)) {
-        sentinel.innerHTML = '<div class="sentinel-loader"><span class="ticker-dot"></span> Loading articles...</div>';
-    } else {
-        sentinel.innerHTML = '';
-    }
+    // Keep the sentinel layout-only. The Load More button is the single visible
+    // loading control; rendering a second loader here made infinite scroll look
+    // like it had another Load More option.
+    sentinel.innerHTML = '';
+    sentinel.setAttribute('aria-busy', show ? 'true' : 'false');
 }
 
 function updateLoadMoreButton() {
@@ -446,17 +446,20 @@ async function fetchArticlesFromWorker(options = {}) {
             fetchPageNum += 1;
             hasMoreServerData = rows.length === serverPageSize && addedCount > 0;
 
-            if (isDefaultFeedQuery() && globalData.length > 0) {
-                localStorage.setItem(CACHE_KEY, JSON.stringify(globalData));
-                localStorage.setItem(CACHE_TIME_KEY, String(Date.now()));
-                localStorage.setItem(CACHE_PAGE_KEY, String(fetchPageNum));
-            }
-
-            applyFiltersAndSort();
+            // Recalculate the result set without rebuilding the DOM for every
+            // API page. The complete render happens once after the batch ends.
+            applyFiltersAndSort(false);
             if (!rows.length || (addedCount === 0 && rows.length === serverPageSize)) break;
         }
 
         currentDisplayed = Math.min(targetVisibleCount, filteredData.length);
+        if (isDefaultFeedQuery() && globalData.length > 0) {
+            // localStorage is synchronous; write once after the complete API
+            // batch rather than blocking the UI after every server page.
+            localStorage.setItem(CACHE_KEY, JSON.stringify(globalData));
+            localStorage.setItem(CACHE_TIME_KEY, String(Date.now()));
+            localStorage.setItem(CACHE_PAGE_KEY, String(fetchPageNum));
+        }
         if (globalData.length > 0) {
             renderTicker(globalData.slice(0, 12));
         } else if (!hasMoreServerData) {
@@ -481,7 +484,7 @@ async function fetchArticlesFromWorker(options = {}) {
     }
 }
 
-function applyFiltersAndSort() {
+function applyFiltersAndSort(render = true) {
     const sortEl = document.getElementById('sort-box');
     const sortMode = sortEl ? sortEl.value : 'newest';
     const searchEl = document.getElementById('search-box');
@@ -515,9 +518,11 @@ function applyFiltersAndSort() {
     if (sortMode === 'oldest') filteredData.sort((a, b) => new Date(a.published_at || 0) - new Date(b.published_at || 0));
     else if (sortMode !== 'bookmarks') filteredData.sort((a, b) => new Date(b.published_at || 0) - new Date(a.published_at || 0));
 
-    setupFilters();
-    renderArticles();
-    updateLoadMoreButton();
+    if (render) {
+        setupFilters();
+        renderArticles();
+        updateLoadMoreButton();
+    }
 }
 
 // True Infinite Scroll Trigger: Expands local items or pulls fresh pages from Baserow
